@@ -23,9 +23,9 @@ export function normalizeModelName(name: string): string {
 const KIE_IMAGE_MODEL = process.env.KIE_IMAGE_MODEL || "gpt-image-2-6/flare-text-to-image";
 const KIE_VIDEO_MODEL = process.env.KIE_VIDEO_MODEL || "grok-imagine-video-1-5-preview";
 const COMETAPI_IMAGE_MODEL =
-  process.env.COMETAPI_IMAGE_MODEL || "gpt-image-2.6-flare-text-to-image";
+  process.env.COMETAPI_IMAGE_MODEL || "gpt-image-2.6-flare";
 const COMETAPI_VIDEO_MODEL =
-  process.env.COMETAPI_VIDEO_MODEL || "grok-imagine-video-1-5-preview";
+  process.env.COMETAPI_VIDEO_MODEL || "grok-imagine-video-1.5";
 
 const IMAGE_CANONICAL = normalizeModelName(KIE_IMAGE_MODEL);
 const VIDEO_CANONICAL = normalizeModelName(KIE_VIDEO_MODEL);
