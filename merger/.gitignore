@@ -1,0 +1,16 @@
+# الأسرار — لا ترفع أبدًا
+.env
+.env.local
+.env.*.local
+
+# سجلات التطوير
+dev-merger.log
+*.log
+*.pid
+
+# اعتماديات
+node_modules/
+
+# ملفات مؤقتة
+/tmp/
+.DS_Store
