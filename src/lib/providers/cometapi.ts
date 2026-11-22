@@ -1,6 +1,8 @@
 // محول CometAPI — المزود الثاني
-// الصور: نقطة متوافقة مع OpenAI تعيد الرابط/b64_json فورًا (متزامنة)
-// الفيديو: نقطة مهام غير متزامنة بنفس نمط create/check — اتبع توثيق api.cometapi.com الحالي عند أي تغيير
+// الصور: POST /v1/images/generations (متزامنة — بلا response_format، النقطة ترفضه) وترد b64_json
+// الفيديو (Grok Imagine 1.5): POST /grok/v1/videos/generations ← request_id
+//   ثم GET /grok/v1/videos/{request_id} ← pending/done/failed/expired والرابط في video.url
+//   التوثيق الرسمي: apidoc.cometapi.com/api/video/xai/video-generation
 import {
   providerError,
   type ProviderAdapter,
@@ -41,8 +43,8 @@ async function cometFetch(
   if (!res.ok) {
     const msg =
       (body?.error as Record<string, unknown>)?.message
-      ? String((body?.error as Record<string, unknown>).message)
-      : ((body?.message as string) || (body?.msg as string) || `HTTP ${res.status}`);
+        ? String((body?.error as Record<string, unknown>).message)
+        : ((body?.message as string) || (body?.msg as string) || `HTTP ${res.status}`);
     throw providerError(String(msg), res.status);
   }
   return body;
@@ -57,7 +59,6 @@ export const cometapiAdapter: ProviderAdapter = {
         model,
         prompt: input.prompt,
         size: input.resolution === "4K" ? "2048x2048" : input.resolution === "2K" ? "1024x1024" : "1024x1024",
-        response_format: "url",
         ...(input.aspect_ratio && input.aspect_ratio !== "auto"
           ? { aspect_ratio: input.aspect_ratio }
           : {}),
@@ -72,8 +73,8 @@ export const cometapiAdapter: ProviderAdapter = {
     for (const it of items) {
       if (typeof it?.url === "string" && it.url) urls.push(it.url);
       else if (typeof it?.b64_json === "string" && it.b64_json) {
-        // b64_json: لا ننزّل شيئًا على سيرفرنا — لكن يجب إعطاء رابط؛
-        // CometAPI الافتراضي يرد url، فإذا رد b64 فقط نعتبره نجاحًا برابط data URI
+        // CometAPI يرد b64_json افتراضيًا (دون url) — نحوّله لرابط data URI
+        // كي يُخزَّن ك«رابط» في القاعدة ويعمل فورًا في المتصفح وعميل MCP
         urls.push(`data:image/png;base64,${it.b64_json}`);
       }
     }
@@ -86,55 +87,67 @@ export const cometapiAdapter: ProviderAdapter = {
     model: string,
     input: ImageInput | VideoInput
   ): Promise<{ providerTaskId: string }> {
-    // الفيديو عبر نقطة المهام غير المتزامنة بنفس نمط create/check
-    const body = await cometFetch(`${COMETAPI_BASE}/v1/jobs/createTask`, key, {
-      method: "POST",
-      body: JSON.stringify({ model, input }),
-    });
-    const data = (body?.data as Record<string, unknown>) ?? (body as Record<string, unknown>);
+    // الفيديو عبر مسار xAI الرسمي لدى CometAPI: POST /grok/v1/videos/generations
+    // JSON فقط: model + prompt + (image.url للصورة→فيديو) + duration/aspect_ratio/resolution
+    const v = input as VideoInput;
+    const body = await cometFetch(
+      `${COMETAPI_BASE}/grok/v1/videos/generations`,
+      key,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          model,
+          prompt: v.prompt,
+          ...(v.image_url ? { image: { url: v.image_url } } : {}),
+          ...(v.aspect_ratio && v.aspect_ratio !== "auto"
+            ? { aspect_ratio: v.aspect_ratio }
+            : {}),
+          ...(v.resolution ? { resolution: v.resolution } : {}),
+          ...(v.duration ? { duration: Math.round(v.duration) } : {}),
+        }),
+      }
+    );
     const taskId =
-      (data?.taskId as string) ?? (data?.task_id as string) ?? (data?.id as string);
-    if (!taskId) throw providerError("لم يُعد CometAPI معرّف مهمة");
+      (body?.request_id as string) ??
+      ((body?.data as Record<string, unknown>)?.request_id as string);
+    if (!taskId) throw providerError("لم يُعد CometAPI معرّف مهمة (request_id)");
     return { providerTaskId: taskId };
   },
 
   async checkTask(key: ProviderKey, providerTaskId: string): Promise<CheckTaskResult> {
+    // GET /grok/v1/videos/{request_id} — الحالات: pending / done / failed / expired
     const body = await cometFetch(
-      `${COMETAPI_BASE}/v1/jobs/recordInfo?taskId=${encodeURIComponent(providerTaskId)}`,
+      `${COMETAPI_BASE}/grok/v1/videos/${encodeURIComponent(providerTaskId)}`,
       key
     );
-    const data = (body?.data as Record<string, unknown>) ?? {};
-    const state = String(
-      data.state ?? data.status ?? "processing"
-    ).toLowerCase();
+    const state = String(body?.status ?? "").toLowerCase();
 
-    if (["success", "completed", "succeeded"].includes(state)) {
-      let urls: string[] = [];
-      // resultJson قد يرد نص JSON داخل JSON مثل kie، أو مصفوفة مباشرة
-      const raw = data.resultJson ?? data.resultUrls;
-      try {
-        const inner =
-          typeof raw === "string" ? JSON.parse(raw) : (raw as Record<string, unknown>);
-        urls = Array.isArray(inner?.resultUrls)
-          ? inner.resultUrls.map((u: unknown) => String(u))
-          : Array.isArray(inner?.urls)
-            ? inner.urls.map((u: unknown) => String(u))
-            : [];
-      } catch {
-        urls = [];
-      }
-      if (!urls.length) throw providerError("نجحت المهمة لكن دون روابط نتائج");
-      return { status: "completed", urls, progress: 100 };
+    if (state === "done") {
+      const video = (body?.video as Record<string, unknown>) ?? {};
+      const url = typeof video.url === "string" ? video.url : "";
+      if (!url) throw providerError("اكتملت المهمة لكن دون رابط فيديو (video.url)");
+      return { status: "completed", urls: [url], progress: 100 };
     }
 
-    if (["fail", "failed", "error"].includes(state)) {
-      return {
-        status: "failed",
-        error: String(data.failMsg ?? data.error ?? "فشل المزود دون تفاصيل"),
-      };
+    if (state === "failed" || state === "expired") {
+      const err = body?.error;
+      const msg =
+        state === "expired"
+          ? "انتهت صلاحية المهمة لدى CometAPI"
+          : typeof err === "string" && err
+            ? err
+            : err && typeof err === "object"
+              ? String((err as Record<string, unknown>).message ?? JSON.stringify(err))
+              : "فشل المزود دون تفاصيل";
+      return { status: "failed", error: msg };
     }
 
-    const progress = state === "generating" ? 55 : state === "queuing" ? 20 : 10;
+    const progress =
+      typeof body?.progress === "number" && body.progress > 0
+        ? body.progress
+        : state === "pending"
+          ? 30
+          : 10;
     return { status: "processing", progress };
   },
 };
